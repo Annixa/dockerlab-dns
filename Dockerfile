@@ -19,9 +19,9 @@ WORKDIR /code
 
 RUN chown dns:dns -R /code
 # Need to run as different user
-USER dns
+# USER dns
 
 
 
 EXPOSE 53/udp
-CMD [ "python", "dnsserver.py"]
+CMD [ "python", "dnsserver.py", "--udp"]
