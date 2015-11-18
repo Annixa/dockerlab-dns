@@ -1,0 +1,31 @@
+dockerlab-dns:
+  build: .
+  container_name: dockerlab-dns
+  ports:
+  - "53:53/udp"
+  links:
+  - dockerlab-db
+  env_file:
+  - passwords.env
+
+
+dockerlab-db:
+  image: postgres:9.3
+  container_name: dockerlab-db
+  restart: always
+  env_file: 
+  - passwords.env
+  volumes_from:
+  - dockerlab-db-data
+  # For development only
+  ports:
+  - "5432:5432"
+
+dockerlab-db-data:
+  image: busybox
+  container_name: dockerlab-db-data
+  volumes:
+   - "/etc/postgresql"
+   - "/var/log/postgresql"
+   - "/var/lib/postgresql/data"
+

@@ -9,7 +9,7 @@ RUN apt-get update && \
     && apt-get clean
 
 # install pip packages
-RUN pip install dnslib 
+RUN pip install dnslib pg8000 pyDAL
 
 RUN useradd -M dns
 RUN usermod -L dns

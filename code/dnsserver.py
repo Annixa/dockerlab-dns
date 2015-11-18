@@ -6,12 +6,15 @@
 
 import argparse
 import datetime
+import signal
 import sys
 import time
 import threading
 import traceback
 import SocketServer
 import struct
+import os
+from pydal import DAL, Field
 try:
     from dnslib import *
 except ImportError:
@@ -19,34 +22,65 @@ except ImportError:
     sys.exit(2)
 
 
+
+# using get will return `None` if a key is not present rather than raise a `KeyError`
+db_host = os.environ.get('POSTGRES_HOST')
+db_name = os.environ.get('POSTGRES_DB')
+db_user = os.environ.get('POSTGRES_USER')
+db_pass = os.environ.get('POSTGRES_PASSWORD')
+
+if not (db_name and db_user and db_pass):
+    print "You kinda need db creds first, k?"
+    print "Please include as environment (env_file or environment in docker-compose) POSTGRES_HOST, POSTGRES_DB, POSTGRES_USER, and POSTGRES_PASSWORD so dockerlab-dns can properly server DNS records."
+    sys.exit(2)
+
+
+#Connect with migrate = False  and define tables so DAL can use the schema natively
+db = DAL('postgres://%s:%s@%s/%s'%(db_user, db_pass, db_host, db_name), migrate=False)
+if db:
+    print "Successfully connected to db \"%s\" on host \"%s\""%(db_name, db_host)
+
+db.define_table('dns_zones',
+    Field('name', 'string'), #ends in . (e.g. example.com.); input should probably have a validator to ensure zones end in a .
+    )
+
+db.define_table('dns_zone_records',
+    Field('zone', 'reference dns_zones'),
+    Field('record_name', 'string'), # (e.g. ns1.example.com.)
+    Field('record_type', 'string', default = 'A'), # (e.g. A, AAAA, CNAME, MX, NS)
+    Field('record_value', 'string'), # (e.g. an IP for A or AAAA, an address for CNAME, and an address and priority for MX)
+    Field('record_ttl', 'integer', default = 60*5) #A TTL in seconds before a client should check for a new value. Can reasonably set to lower or higher depending on the volatility of the records
+    )
+
+
 class DomainName(str):
     def __getattr__(self, item):
         return DomainName(item + '.' + self)
 
 
-D = DomainName('example.com.')
-IP = '127.0.0.1'
-TTL = 60 * 5
+# D = DomainName('example.com.')
+# IP = '127.0.0.1'
+# TTL = 60 * 5
 
-soa_record = SOA(
-    mname=D.ns1,  # primary name server
-    rname=D.andrei,  # email of the domain administrator
-    times=(
-        201307231,  # serial number
-        60 * 60 * 1,  # refresh
-        60 * 60 * 3,  # retry
-        60 * 60 * 24,  # expire
-        60 * 60 * 1,  # minimum
-    )
-)
-ns_records = [NS(D.ns1), NS(D.ns2)]
-records = {
-    D: [A(IP), AAAA((0,) * 16), MX(D.mail), soa_record] + ns_records,
-    D.ns1: [A(IP)],  # MX and NS records must never point to a CNAME alias (RFC 2181 section 10.3)
-    D.ns2: [A(IP)],
-    D.mail: [A(IP)],
-    D.andrei: [CNAME(D)],
-}
+# soa_record = SOA(
+#     mname=D.ns1,  # primary name server
+#     rname=D.andrei,  # email of the domain administrator
+#     times=(
+#         201307231,  # serial number
+#         60 * 60 * 1,  # refresh
+#         60 * 60 * 3,  # retry
+#         60 * 60 * 24,  # expire
+#         60 * 60 * 1,  # minimum
+#     )
+# )
+# ns_records = [NS(D.ns1), NS(D.ns2)]
+# records = {
+#     D: [A(IP), AAAA((0,) * 16), MX(D.mail), soa_record] + ns_records,
+#     D.ns1: [A(IP)],  # MX and NS records must never point to a CNAME alias (RFC 2181 section 10.3)
+#     D.ns2: [A(IP)],
+#     D.mail: [A(IP)],
+#     D.andrei: [CNAME(D)],
+# }
 
 
 def dns_response(data):
@@ -61,19 +95,26 @@ def dns_response(data):
     qtype = request.q.qtype
     qt = QTYPE[qtype]
 
-    if qn == D or qn.endswith('.' + D):
+    # if qn == D or qn.endswith('.' + D):
+    # Sheiße, multi `.` tlds suck (e.g. .co.uk)
+    zone=None
+    for z in db(db.dns_zones).select():
+        if qn == z.name or qn.endswith('.' + z.name):
+            zone=z
+            break
 
-        for name, rrs in records.items():
-            if name == qn:
-                for rdata in rrs:
-                    rqt = rdata.__class__.__name__
-                    if qt in ['*', rqt]:
-                        reply.add_answer(RR(rname=qname, rtype=getattr(QTYPE, rqt), rclass=1, ttl=TTL, rdata=rdata))
+    if zone:
+        for record in db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_name == qn)).select():
+            rqt = record.record_type
+            if qt in ['*', rqt]:
+                reply.add_answer(RR(rname=qname, rtype=getattr(QTYPE, rqt), rclass=1, ttl=record.record_ttl, rdata=record.record_value))
 
-        for rdata in ns_records:
-            reply.add_ar(RR(rname=D, rtype=QTYPE.NS, rclass=1, ttl=TTL, rdata=rdata))
+        for rdata in db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_type == 'NS')).select():
+            reply.add_ar(RR(rname=zone.name, rtype=QTYPE.NS, rclass=1, ttl=record.record_ttl, rdata=rdata.record_value))
 
-        reply.add_auth(RR(rname=D, rtype=QTYPE.SOA, rclass=1, ttl=TTL, rdata=soa_record))
+        SOA=db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_type == 'SOA')).select().first()
+        if SOA:
+            reply.add_auth(RR(rname=zone.name, rtype=QTYPE.SOA, rclass=1, ttl=SOA.record_ttl, rdata=record.record_value))
 
     print("---- Reply:\n", reply)
 
@@ -127,7 +168,6 @@ class UDPRequestHandler(BaseRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description='Start a DNS implemented in Python.')
-    parser = argparse.ArgumentParser(description='Start a DNS implemented in Python. Usually DNSs use UDP on port 53.')
     parser.add_argument('--port', default=53, type=int, help='The port to listen on.')
     parser.add_argument('--tcp', action='store_true', help='Listen to TCP connections.')
     parser.add_argument('--udp', action='store_true', help='Listen to UDP datagrams.')
@@ -147,8 +187,14 @@ def main():
         thread.start()
         print("%s server loop running in thread: %s" % (s.RequestHandlerClass.__name__[:3], thread.name))
 
+    status=dict(sigintted=False)
+    def signal_handler(signal, frame):
+            print('Received SIGINT from system')
+            status["sigintted"]=True
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
-        while 1:
+        while not status["sigintted"]:
             time.sleep(1)
             sys.stderr.flush()
             sys.stdout.flush()
