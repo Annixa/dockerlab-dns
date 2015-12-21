@@ -36,7 +36,7 @@ if not (db_name and db_user and db_pass):
 
 
 #Connect with migrate = False  and define tables so DAL can use the schema natively
-db = DAL('postgres://%s:%s@%s/%s'%(db_user, db_pass, db_host, db_name), migrate=False)
+db = DAL('postgres://%s:%s@%s/%s'%(db_user, db_pass, db_host, db_name), migrate=True)
 if db:
     print "Successfully connected to db \"%s\" on host \"%s\""%(db_name, db_host)
 
@@ -95,6 +95,8 @@ def dns_response(data):
     qtype = request.q.qtype
     qt = QTYPE[qtype]
 
+    print "Looking for zone and record type: %s, type: %s"%(qn, qt)
+
     # if qn == D or qn.endswith('.' + D):
     # Sheiße, multi `.` tlds suck (e.g. .co.uk)
     zone=None
@@ -104,17 +106,32 @@ def dns_response(data):
             break
 
     if zone:
-        for record in db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_name == qn)).select():
+        print "Found zone: %s"%(zone)
+
+        # Lookup records in zone. Required for wildcard queries
+        for record in db((db.dns_zone_records.zone == zone.id) & (db.dns_zone_records.record_name == qn)).select():
             rqt = record.record_type
+            print "Possible record in zone (%s): %s: %s"%(qn, record.record_type, record.record_value)
+
+            # Found a record in the requested types!
             if qt in ['*', rqt]:
-                reply.add_answer(RR(rname=qname, rtype=getattr(QTYPE, rqt), rclass=1, ttl=record.record_ttl, rdata=record.record_value))
+                print "Found record in zone (%s): %s: %s "%(qn, record.record_type, record.record_value)
+
+                # Be sure requested type is indeed in dnslib
+                if qt in dir(dns):
+                    record_value = record.record_value.split(" ")
+                    # Handles MX priorities explicitly or implicitly and other records
+                    reply.add_answer(RR(rname=qname, rtype=getattr(QTYPE, rqt), rclass=1, ttl=record.record_ttl, rdata=getattr(dns,qt)(record_value[1], int(record_value[0])) if record.record_type == 'MX' and len(record_value) > 1 else getattr(dns,qt)(record_value[0])))
+                else:
+                    print "Error: Requested a non DNS record type: %s"%(qt)
 
         for rdata in db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_type == 'NS')).select():
-            reply.add_ar(RR(rname=zone.name, rtype=QTYPE.NS, rclass=1, ttl=record.record_ttl, rdata=rdata.record_value))
+            reply.add_ar(RR(rname=zone.name, rtype=QTYPE.NS, rclass=1, ttl=record.record_ttl, rdata=NS(rdata.record_value)))
 
-        SOA=db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_type == 'SOA')).select().first()
-        if SOA:
-            reply.add_auth(RR(rname=zone.name, rtype=QTYPE.SOA, rclass=1, ttl=SOA.record_ttl, rdata=record.record_value))
+        SOA_rec=db((db.dns_zone_records.id == zone.id) & (db.dns_zone_records.record_type == 'SOA')).select().first()
+        if SOA_rec:
+            SOA_vals = SOA_rec.record_value.split(" ")
+            reply.add_auth(RR(rname=zone.name, rtype=QTYPE.SOA, rclass=1, ttl=SOA_rec.record_ttl, rdata=SOA(SOA_vals[0], SOA_vals[1], times=tuple([int(n) for n in SOA_vals[2:]]))))
 
     print("---- Reply:\n", reply)
 

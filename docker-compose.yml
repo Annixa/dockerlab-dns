@@ -7,6 +7,8 @@ dockerlab-dns:
   - dockerlab-db
   env_file:
   - passwords.env
+  volumes:
+  - "./code:/code"
 
 
 dockerlab-db:
