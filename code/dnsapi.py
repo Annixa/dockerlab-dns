@@ -51,21 +51,22 @@ class DNSAPI(object):
 		return self.db(q).select().as_list()
 
 
-	def delete_zone(self, zone_name, and_records=True):
-		if and_records:
-			self.db((self.db.dns_zones.id == self.db.dns_zone_records.zone) & (self.db.dns_zones.name == zone_name)).delete()
+
+	def delete_zone(self, zone_name):
+		self.db.dns_zones((self.db.dns_zone_records.zone == self.db.dns_zones.id ) & (self.db.dns_zones.name == zone_name)).delete()
 		return self.db(self.db.dns_zones.name == zone_name).delete()
 
-	def delecte_record(self, record_id):
+	def delete_record(self, record_id):
 		return self.db((self.db.dns_zone_records.id == record_id)).delete()
 
-	def get_records_matching(self, zone_id, record_name=None, record_type=None):
-		q = (self.db.dns_zone_records.zone == zone_id)
-		if not record_name is None:
-			q = (q & (self.db.dns_zone_records.record_name == record_name))
-		if not record_type is None:
-			q = (q & (self.db.dns_zone_records.record_type==record_type))
-		return self.db(q).select().as_list()
+	def delete_record_matching(self, zone_id, record_name, record_type):
+		return self.db((self.db.dns_zone_records.zone == zone_id) & (self.db.dns_zone_records.record_name == record_name) & (self.db.dns_zone_records.record_type==record_type)).delete()
 
 
+
+	def create_zone(self, zone_name):
+		return self.db.dns_zones.insert(name=zone_name)
+
+	def create_record(self, zone_id, record_name, record_type, record_value, record_ttl):
+		return self.db.dns_zone_records.insert(zone=zone_id, record_name=record_name, record_type=record_type, record_value=record_value, record_ttl=record_ttl)
 
